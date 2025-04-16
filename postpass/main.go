@@ -204,15 +204,56 @@ func explain(db *sql.DB, query string) (float64, float64, error) {
 	return parsedResult[0].Plan.Startup, parsedResult[0].Plan.Total, nil
 }
 
+func handleExplain(db *sql.DB, writer http.ResponseWriter, r *http.Request) {
+	writer.Header().Set("Access-Control-Allow-Origin", "*")
+	writer.Header().Set("Content-Type", "text/plain")
+
+	// process GET/POST parameters
+	r.ParseForm()
+	tData := r.Form["data"]
+	if tData == nil {
+		log.Printf("no data field given\n")
+		http.Error(writer, "no data field given", http.StatusBadRequest)
+		return
+	}
+	data := tData[0]
+
+	log.Printf("explain request: query '%s'\n",
+		strings.Join(strings.Fields(strings.TrimSpace(data)), " "))
+
+	var startTime = time.Now().UnixMilli()
+
+	from, to, err := explain(db, data)
+	if err != nil {
+		log.Printf("request #%d: error in EXPLAIN: '%s'\n", err.Error())
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// use average of two cost values given by EXPLAIN
+	med := int((from + to) / 2)
+
+	// ... and send the queue decision back to the client
+	if med < QuickMediumThreshold {
+		fmt.Fprint(writer, "quick")
+	} else if med < MediumSlowThreshold {
+		fmt.Fprint(writer, "medium")
+	} else {
+		fmt.Fprint(writer, "slow")
+	}
+
+	log.Printf("explain request: completed after %dms\n", time.Now().UnixMilli()-startTime)
+}
+
 /*
- * API handler that receives a web request
+ * API handler that receives a web request to /interpreter
  *
  * executes an EXPLAIN on the request
  * (which doubles as a syntax check)
  * and when EXPLAIN successful, sends the request to one of
  * three classes of worker.
  */
-func handleApi(db *sql.DB, slow chan<- WorkItem, medium chan<- WorkItem, quick chan<- WorkItem, writer http.ResponseWriter, r *http.Request) {
+func handleInterpreter(db *sql.DB, slow chan<- WorkItem, medium chan<- WorkItem, quick chan<- WorkItem, writer http.ResponseWriter, r *http.Request) {
 
 	var id int
 
@@ -361,7 +402,11 @@ func main() {
 
 	// set up callback for /interpreter URL
 	http.HandleFunc("/interpreter", func(w http.ResponseWriter, r *http.Request) {
-		handleApi(db, slow_jobs, medium_jobs, quick_jobs, w, r)
+		handleInterpreter(db, slow_jobs, medium_jobs, quick_jobs, w, r)
+	})
+	// set up callback for /explain URL
+	http.HandleFunc("/explain", func(w http.ResponseWriter, r *http.Request) {
+		handleExplain(db, w, r)
 	})
 
 	// endless loop
